@@ -26,7 +26,7 @@ use libafl::{
         tuples::{tuple_list, Merge},
         AsSlice,
     },
-    corpus::{Corpus, OnDiskCorpus},
+    corpus::{CachedOnDiskCorpus, Corpus},
     events::SimpleRestartingEventManager,
     executors::{inprocess::InProcessExecutor, ExitKind, TimeoutExecutor},
     feedback_or,
@@ -44,10 +44,7 @@ use libafl::{
     state::{HasCorpus, HasMetadata, StdState},
     Error,
 };
-use libafl_targets::{
-    libfuzzer_initialize, libfuzzer_test_one_input, CmpLogObserver, CMPLOG_MAP, EDGES_MAP,
-    MAX_EDGES_NUM,
-};
+use libafl_targets::{libfuzzer_initialize, libfuzzer_test_one_input, EDGES_MAP, MAX_EDGES_NUM};
 
 #[cfg(target_os = "linux")]
 use libafl_targets::autotokens;
@@ -275,10 +272,10 @@ fn fuzz(
             // RNG
             StdRand::with_seed(current_nanos()),
             // Corpus that will be evolved, we keep it in memory for performance
-            OnDiskCorpus::new(corpus_dir).unwrap(),
+            CachedOnDiskCorpus::new(corpus_dir, 1024).unwrap(),
             // Corpus in which we store solutions (crashes in this example),
             // on disk so the user can get them after stopping the fuzzer
-            OnDiskCorpus::new(objective_dir).unwrap(),
+            CachedOnDiskCorpus::new(objective_dir, 1024).unwrap(),
             // States of the feedbacks.
             // The feedbacks can report the data that should persist in the State.
             &mut feedback,
