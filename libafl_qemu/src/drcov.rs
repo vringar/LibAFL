@@ -1,28 +1,27 @@
-use std::{path::PathBuf, sync::Mutex};
-
 use hashbrown::{hash_map::Entry, HashMap};
-use libafl::{
-    executors::ExitKind, inputs::UsesInput, observers::ObserversTuple, state::HasMetadata,
-};
+use libafl::{inputs::Input, state::HasMetadata};
+use std::path::PathBuf;
+use std::collections::HashSet;
 use libafl_targets::drcov::{DrCovBasicBlock, DrCovWriter};
 use rangemap::RangeMap;
-use serde::{Deserialize, Serialize};
+use lazy_static::lazy_static;
+use std::sync::Mutex;
 
 use crate::{
-    emu::{GuestAddr, GuestUsize},
+    Emulator,
+    emu::GuestAddr,
     helper::{QemuHelper, QemuHelperTuple, QemuInstrumentationFilter},
     hooks::QemuHooks,
-    Emulator,
+    blocks::pc2basicblock,
 };
 
-static DRCOV_IDS: Mutex<Option<Vec<u64>>> = Mutex::new(None);
-static DRCOV_MAP: Mutex<Option<HashMap<GuestAddr, u64>>> = Mutex::new(None);
-static DRCOV_LENGTHS: Mutex<Option<HashMap<GuestAddr, GuestUsize>>> = Mutex::new(None);
+lazy_static! {
+    static ref DRCOV_IDS: Mutex<HashSet<u64>> = Mutex::new(HashSet::new());
+    static ref DRCOV_MAP: Mutex<HashMap<GuestAddr, u64>> = Mutex::new(HashMap::new());
+}
 
-#[cfg_attr(
-    any(not(feature = "serdeany_autoreg"), miri),
-    allow(clippy::unsafe_derive_deserialize)
-)] // for SerdeAny
+use serde::{Deserialize, Serialize};
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct QemuDrCovMetadata {
     pub current_id: u64,
@@ -31,248 +30,122 @@ pub struct QemuDrCovMetadata {
 impl QemuDrCovMetadata {
     #[must_use]
     pub fn new() -> Self {
-        Self { current_id: 0 }
+        Self {
+            current_id: 0,
+        }
     }
 }
 
-libafl_bolts::impl_serdeany!(QemuDrCovMetadata);
+libafl::impl_serdeany!(QemuDrCovMetadata);
 
 #[derive(Debug)]
 pub struct QemuDrCovHelper {
     filter: QemuInstrumentationFilter,
-    module_mapping: RangeMap<usize, (u16, String)>,
     filename: PathBuf,
-    full_trace: bool,
     drcov_len: usize,
 }
 
 impl QemuDrCovHelper {
     #[must_use]
-    #[allow(clippy::let_underscore_untyped)]
-    pub fn new(
-        filter: QemuInstrumentationFilter,
-        module_mapping: RangeMap<usize, (u16, String)>,
-        filename: PathBuf,
-        full_trace: bool,
-    ) -> Self {
-        if full_trace {
-            let _ = DRCOV_IDS.lock().unwrap().insert(vec![]);
-        }
-        let _ = DRCOV_MAP.lock().unwrap().insert(HashMap::new());
-        let _ = DRCOV_LENGTHS.lock().unwrap().insert(HashMap::new());
+    pub fn new(filter: QemuInstrumentationFilter, filename: PathBuf) -> Self {
         Self {
             filter,
-            module_mapping,
             filename,
-            full_trace,
             drcov_len: 0,
         }
     }
 
     #[must_use]
-    pub fn must_instrument(&self, addr: GuestAddr) -> bool {
+    pub fn must_instrument(&self, addr: u64) -> bool {
         self.filter.allowed(addr)
     }
 }
 
-impl<S> QemuHelper<S> for QemuDrCovHelper
+impl<I, S> QemuHelper<I, S> for QemuDrCovHelper
 where
-    S: UsesInput + HasMetadata,
+    I: Input,
+    S: HasMetadata,
 {
-    fn init_hooks<QT>(&self, hooks: &QemuHooks<'_, QT, S>)
+    fn init_hooks<QT>(&self, hooks: &QemuHooks<'_, I, QT, S>)
     where
-        QT: QemuHelperTuple<S>,
+        QT: QemuHelperTuple<I, S>,
     {
-        hooks.blocks(
-            Some(gen_unique_block_ids::<QT, S>),
-            Some(gen_block_lengths::<QT, S>),
-            Some(exec_trace_block::<QT, S>),
+        hooks.blocks_raw(
+            Some(gen_unique_block_ids::<I, QT, S>),
+            Some(trace_block),
         );
     }
 
-    fn pre_exec(&mut self, _emulator: &Emulator, _input: &S::Input) {}
+    fn pre_exec(&mut self, _emulator: &Emulator, _input: &I) {}
 
-    fn post_exec<OT>(
-        &mut self,
-        _emulator: &Emulator,
-        _input: &S::Input,
-        _observers: &mut OT,
-        _exit_kind: &mut ExitKind,
-    ) where
-        OT: ObserversTuple<S>,
-    {
-        let lengths_opt = DRCOV_LENGTHS.lock().unwrap();
-        let lengths = lengths_opt.as_ref().unwrap();
-        if self.full_trace {
-            if DRCOV_IDS.lock().unwrap().as_ref().unwrap().len() > self.drcov_len {
-                let mut drcov_vec = Vec::<DrCovBasicBlock>::new();
-                for id in DRCOV_IDS.lock().unwrap().as_ref().unwrap() {
-                    'pcs_full: for (pc, idm) in DRCOV_MAP.lock().unwrap().as_ref().unwrap() {
-                        let mut module_found = false;
-                        for module in self.module_mapping.iter() {
-                            let (range, (_, _)) = module;
-                            if *pc >= range.start.try_into().unwrap()
-                                && *pc <= range.end.try_into().unwrap()
-                            {
-                                module_found = true;
-                                break;
-                            }
+    fn post_exec(&mut self, emulator: &Emulator, _input: &I) {
+        if DRCOV_IDS.lock().unwrap().len() > self.drcov_len {
+            println!("New DrCov lenght = {}", DRCOV_IDS.lock().unwrap().len());
+            let mut drcov_vec = Vec::<DrCovBasicBlock>::new();
+            for id in DRCOV_IDS.lock().unwrap().iter() {
+                for (pc, idm) in DRCOV_MAP.lock().unwrap().iter() {
+                    if *idm == *id {
+                        let block = pc2basicblock(*pc, &emulator);
+                        let mut block_len = 0;
+                        for instr in &block {
+                            block_len += instr.insn_len;
                         }
-                        if !module_found {
-                            continue 'pcs_full;
-                        }
-                        if *idm == *id {
-                            match lengths.get(pc) {
-                                Some(block_length) => {
-                                    drcov_vec.push(DrCovBasicBlock::new(
-                                        *pc as usize,
-                                        *pc as usize + *block_length as usize,
-                                    ));
-                                }
-                                None => {
-                                    log::info!("Failed to find block length for: {pc:}");
-                                }
-                            }
-                        }
+                        block_len -= &block.last().unwrap().insn_len;
+                        drcov_vec.push(
+                            DrCovBasicBlock::new(*pc as usize, *pc as usize + block_len)
+                        );
                     }
                 }
-
-                DrCovWriter::new(&self.module_mapping)
-                    .write(&self.filename, &drcov_vec)
-                    .expect("Failed to write coverage file");
             }
-            self.drcov_len = DRCOV_IDS.lock().unwrap().as_ref().unwrap().len();
-        } else {
-            if DRCOV_MAP.lock().unwrap().as_ref().unwrap().len() > self.drcov_len {
-                let mut drcov_vec = Vec::<DrCovBasicBlock>::new();
-                'pcs: for (pc, _) in DRCOV_MAP.lock().unwrap().as_ref().unwrap() {
-                    let mut module_found = false;
-                    for module in self.module_mapping.iter() {
-                        let (range, (_, _)) = module;
-                        if *pc >= range.start.try_into().unwrap()
-                            && *pc <= range.end.try_into().unwrap()
-                        {
-                            module_found = true;
-                            break;
-                        }
-                    }
-                    if !module_found {
-                        continue 'pcs;
-                    }
-                    match lengths.get(pc) {
-                        Some(block_length) => {
-                            drcov_vec.push(DrCovBasicBlock::new(
-                                *pc as usize,
-                                *pc as usize + *block_length as usize,
-                            ));
-                        }
-                        None => {
-                            log::info!("Failed to find block length for: {pc:}");
-                        }
-                    }
-                }
 
-                DrCovWriter::new(&self.module_mapping)
-                    .write(&self.filename, &drcov_vec)
-                    .expect("Failed to write coverage file");
-            }
-            self.drcov_len = DRCOV_MAP.lock().unwrap().as_ref().unwrap().len();
+            let mut rangemap = RangeMap::<usize, (u16, String)>::new();
+            rangemap.insert((GuestAddr::MIN as usize)..(GuestAddr::MAX as usize), (0, "test".to_string()));
+            DrCovWriter::new(&rangemap).write(&self.filename, &drcov_vec).expect("Failed to write coverage file");
         }
+        self.drcov_len = DRCOV_IDS.lock().unwrap().len();
     }
 }
 
-pub fn gen_unique_block_ids<QT, S>(
-    hooks: &mut QemuHooks<'_, QT, S>,
+pub fn gen_unique_block_ids<I, QT, S>(
+    hooks: &mut QemuHooks<'_, I, QT, S>,
     state: Option<&mut S>,
     pc: GuestAddr,
 ) -> Option<u64>
 where
     S: HasMetadata,
-    S: UsesInput,
-    QT: QemuHelperTuple<S>,
+    I: Input,
+    QT: QemuHelperTuple<I, S>,
 {
-    let drcov_helper = hooks
-        .helpers()
-        .match_first_type::<QemuDrCovHelper>()
-        .unwrap();
-    if !drcov_helper.must_instrument(pc) {
-        return None;
+    if let Some(h) = hooks.helpers().match_first_type::<QemuDrCovHelper>() {
+        if !h.must_instrument(pc.into()) {
+            return None;
+        }
     }
-
     let state = state.expect("The gen_unique_block_ids hook works only for in-process fuzzing");
-    if state
-        .metadata_map_mut()
-        .get_mut::<QemuDrCovMetadata>()
-        .is_none()
-    {
+    if state.metadata().get::<QemuDrCovMetadata>().is_none() {
         state.add_metadata(QemuDrCovMetadata::new());
     }
     let meta = state
-        .metadata_map_mut()
+        .metadata_mut()
         .get_mut::<QemuDrCovMetadata>()
         .unwrap();
 
-    match DRCOV_MAP.lock().unwrap().as_mut().unwrap().entry(pc) {
+    match DRCOV_MAP.lock().unwrap().entry(pc) {
         Entry::Occupied(e) => {
             let id = *e.get();
-            if drcov_helper.full_trace {
-                Some(id)
-            } else {
-                None
-            }
+            Some(id)
         }
         Entry::Vacant(e) => {
             let id = meta.current_id;
             e.insert(id);
             meta.current_id = id + 1;
-            if drcov_helper.full_trace {
-                // GuestAddress is u32 for 32 bit guests
-                #[allow(clippy::unnecessary_cast)]
-                Some(id as u64)
-            } else {
-                None
-            }
+            // GuestAddress is u32 for 32 bit guests
+            #[allow(clippy::unnecessary_cast)]
+            Some(id as u64)
         }
     }
 }
 
-pub fn gen_block_lengths<QT, S>(
-    hooks: &mut QemuHooks<'_, QT, S>,
-    _state: Option<&mut S>,
-    pc: GuestAddr,
-    block_length: GuestUsize,
-) where
-    S: HasMetadata,
-    S: UsesInput,
-    QT: QemuHelperTuple<S>,
-{
-    let drcov_helper = hooks
-        .helpers()
-        .match_first_type::<QemuDrCovHelper>()
-        .unwrap();
-    if !drcov_helper.must_instrument(pc) {
-        return;
-    }
-    DRCOV_LENGTHS
-        .lock()
-        .unwrap()
-        .as_mut()
-        .unwrap()
-        .insert(pc, block_length);
-}
-
-pub fn exec_trace_block<QT, S>(hooks: &mut QemuHooks<'_, QT, S>, _state: Option<&mut S>, id: u64)
-where
-    S: HasMetadata,
-    S: UsesInput,
-    QT: QemuHelperTuple<S>,
-{
-    if hooks
-        .helpers()
-        .match_first_type::<QemuDrCovHelper>()
-        .unwrap()
-        .full_trace
-    {
-        DRCOV_IDS.lock().unwrap().as_mut().unwrap().push(id);
-    }
+pub extern "C" fn trace_block(id: u64, _data: u64) {
+    DRCOV_IDS.lock().unwrap().insert(id);
 }
