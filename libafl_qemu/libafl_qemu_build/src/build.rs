@@ -15,7 +15,7 @@ fn build_dep_check(tools: &[&str]) {
         which(tool).unwrap_or_else(|_| panic!("Build tool {tool} not found"));
     }
 }
-
+// TODO: Move all the build flags here
 #[allow(clippy::too_many_lines, clippy::missing_panics_doc)]
 #[must_use]
 pub fn build(
