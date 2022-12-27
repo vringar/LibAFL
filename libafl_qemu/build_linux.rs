@@ -19,15 +19,8 @@ pub fn build() {
     println!("cargo:rerun-if-env-changed=EMULATION_MODE");
 
     println!("cargo:rerun-if-changed=build.rs");
-<<<<<<< HEAD
     println!("cargo:rerun-if-changed=build_linux.rs");
-||||||| parent of 40d1bdda (Improve libafl_qemu build process)
-    println!("cargo:rerun-if-changed=src/asan-giovese.c");
-    println!("cargo:rerun-if-changed=src/asan-giovese.h");
     println!("cargo:rerun-if-env-changed=CROSS_CC");
-=======
-    println!("cargo:rerun-if-env-changed=CROSS_CC");
->>>>>>> 40d1bdda (Improve libafl_qemu build process)
 
     let cpu_target = if cfg!(feature = "x86_64") {
         "x86_64".to_string()
