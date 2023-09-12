@@ -5,13 +5,16 @@ use libafl::{inputs::UsesInput, state::HasMetadata};
 use libafl_targets::drcov::{DrCovBasicBlock, DrCovWriter};
 use rangemap::RangeMap;
 use serde::{Deserialize, Serialize};
+// use libafl::prelude::{ExitKind, ObserversTuple};
+use libafl::executors::ExitKind;
+use libafl::observers::ObserversTuple;
 
 use crate::{
     blocks::pc2basicblock,
     emu::GuestAddr,
     helper::{QemuHelper, QemuHelperTuple, QemuInstrumentationFilter},
     hooks::QemuHooks,
-    Emulator,
+    Emulator, GuestUsize,
 };
 
 static DRCOV_IDS: Mutex<Option<Vec<u64>>> = Mutex::new(None);
@@ -29,7 +32,7 @@ impl QemuDrCovMetadata {
     }
 }
 
-libafl::impl_serdeany!(QemuDrCovMetadata);
+libafl_bolts::impl_serdeany!(QemuDrCovMetadata);
 
 #[derive(Debug)]
 pub struct QemuDrCovHelper {
@@ -78,12 +81,21 @@ where
         hooks.blocks(
             Some(gen_unique_block_ids::<QT, S>),
             Some(exec_trace_block::<QT, S>),
+            None,
         );
     }
 
     fn pre_exec(&mut self, _emulator: &Emulator, _input: &S::Input) {}
 
-    fn post_exec(&mut self, emulator: &Emulator, _input: &S::Input) {
+    fn post_exec<OT>(
+        &mut self,
+        emulator: &Emulator,
+        _input: &S::Input,
+        _observers: &mut OT,
+        _exit_kind: &mut ExitKind,
+    ) where
+        OT: ObserversTuple<S>,
+    {
         if self.full_trace {
             if DRCOV_IDS.lock().unwrap().as_ref().unwrap().len() > self.drcov_len {
                 let mut drcov_vec = Vec::<DrCovBasicBlock>::new();
@@ -173,14 +185,10 @@ where
     }
 
     let state = state.expect("The gen_unique_block_ids hook works only for in-process fuzzing");
-    if state
-        .metadata_mut()
-        .get_mut::<QemuDrCovMetadata>()
-        .is_none()
-    {
+    if state.metadata_mut::<QemuDrCovMetadata>().is_err() {
         state.add_metadata(QemuDrCovMetadata::new());
     }
-    let meta = state.metadata_mut().get_mut::<QemuDrCovMetadata>().unwrap();
+    let meta = state.metadata_mut::<QemuDrCovMetadata>().unwrap();
 
     match DRCOV_MAP.lock().unwrap().as_mut().unwrap().entry(pc) {
         Entry::Occupied(e) => {
@@ -206,8 +214,12 @@ where
     }
 }
 
-pub fn exec_trace_block<QT, S>(hooks: &mut QemuHooks<'_, QT, S>, _state: Option<&mut S>, id: u64)
-where
+pub fn exec_trace_block<QT, S>(
+    hooks: &mut QemuHooks<'_, QT, S>,
+    _state: Option<&mut S>,
+    pc: GuestAddr,
+    _block_length: GuestUsize,
+) where
     S: HasMetadata,
     S: UsesInput,
     QT: QemuHelperTuple<S>,
@@ -218,6 +230,6 @@ where
         .unwrap()
         .full_trace
     {
-        DRCOV_IDS.lock().unwrap().as_mut().unwrap().push(id);
+        DRCOV_IDS.lock().unwrap().as_mut().unwrap().push(pc);
     }
 }
