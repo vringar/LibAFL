@@ -19,7 +19,8 @@ RUN sh -c 'echo set encoding=utf-8 > /root/.vimrc' \
 RUN rustup component add rustfmt clippy
 
 # Install clang 11, common build tools
-RUN apt update && apt install -y build-essential gdb git wget clang clang-tools libc++-11-dev libc++abi-11-dev llvm
+RUN apt update && apt install -y build-essential gdb git wget clang clang-tools libc++-11-dev libc++abi-11-dev llvm\
+    cmake python3-venv ninja-build
 
 # Copy a dummy.rs and Cargo.toml first, so that dependencies are cached
 WORKDIR /libafl

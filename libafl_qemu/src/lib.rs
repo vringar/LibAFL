@@ -91,6 +91,8 @@ pub mod calls;
 #[cfg(not(cpu_target = "hexagon"))]
 pub mod drcov;
 
+pub mod blocks;
+
 pub mod executor;
 pub use executor::QemuExecutor;
 #[cfg(feature = "fork")]
