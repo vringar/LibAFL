@@ -21,7 +21,7 @@ RUN rustup component add rustfmt clippy
 
 # Install clang 18, common build tools
 ENV LLVM_VERSION=18
-RUN apt update && apt install -y build-essential gdb git wget python3-venv ninja-build lsb-release software-properties-common gnupg cmake
+RUN apt update && apt install -y build-essential gdb git wget python3-venv ninja-build lsb-release software-properties-common gnupg cmake nettle-dev
 # Workaround until https://github.com/llvm/llvm-project/issues/62475 is resolved
 RUN set -ex &&\
     echo "deb http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-${LLVM_VERSION} main" > /etc/apt/sources.list.d/apt.llvm.org.list &&\

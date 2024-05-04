@@ -6,12 +6,12 @@ use std::{
 };
 
 use which::which;
-
 use crate::cargo_add_rpath;
 
-const QEMU_URL: &str = "https://github.com/AFLplusplus/qemu-libafl-bridge";
+
+const QEMU_URL: &str = "git@git.tu-berlin.de:niklas.jacob/asp-qemu.git";
 const QEMU_DIRNAME: &str = "qemu-libafl-bridge";
-const QEMU_REVISION: &str = "9d2197b73bf5e66e709f9f1669467d5c84062da0";
+const QEMU_REVISION: &str = "f1d1a6dc5ab06a6b17e9dc23f4b81bf97a8f7e02";
 
 #[allow(clippy::module_name_repetitions)]
 pub struct BuildResult {
@@ -163,7 +163,7 @@ fn configure_qemu(
         .arg("--disable-mpath")
         .arg("--disable-multiprocess")
         .arg("--disable-netmap")
-        .arg("--disable-nettle")
+//        .arg("--disable-nettle")
         .arg("--disable-numa")
         .arg("--disable-nvmm")
         .arg("--disable-opengl")
@@ -218,6 +218,9 @@ fn configure_qemu(
         .arg("--disable-tests");
     }
 
+    // ASPFUZZ BEGIN
+    cmd.arg("--enable-nettle");
+    // ASPFUZZ END
     cmd
 }
 
