@@ -841,6 +841,7 @@ where
         Z: Evaluator<E, EM, State = Self>,
     {
         self.canonicalize_input_dirs(in_dirs)?;
+        log::debug!("Loading with in_dirs {:?}, canonicalized as {:?} ", in_dirs, self.remaining_initial_files);
         self.continue_loading_initial_inputs_custom(
             fuzzer,
             executor,
